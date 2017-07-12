@@ -21,7 +21,7 @@ main = defaultMain tests
 tests :: TestTree
 tests = testGroup "Whole Checker"
     [ testCase "add two ints" $ do
-        Right ty <- pure . typecheck $ app (app (var "+") (number 1)) (number 2)
+        Right ty <- pure . runTypecheck $ app (app (var "+") (number 1)) (number 2)
         freeze <$> ty @?= Just <$> Node numTy' (App 
                                      (Node (lamTy' numTy' numTy') (App 
                                         (Node (lamTy' numTy' (lamTy' numTy' numTy')) (Var "+"))

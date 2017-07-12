@@ -4,16 +4,16 @@ module Lib
     , lam, app, var, number, text
     , lamTy, numTy, textTy
     , lamTy', numTy', textTy'
-    , typecheck
+    , runTypecheck, evalTypecheck, typecheck
     ) where
 
 import           Control.Monad (void)
 import           Control.Monad.Error.Class (MonadError, throwError)
 import           Control.Monad.Identity (runIdentity, Identity)
 import           Control.Monad.Trans (MonadTrans, lift)
-import           Control.Monad.Trans.Either (runEitherT)
+import           Control.Monad.Trans.Either (EitherT, runEitherT)
 import           Control.Unification
-import           Control.Unification.IntVar (IntVar, evalIntBindingT, IntBindingT)
+import           Control.Unification.IntVar (IntVar, evalIntBindingT, runIntBindingT, IntBindingT, IntBindingState)
 import           Control.Unification.Types
 import qualified Data.Map as Map
 import           Data.Map (Map)
@@ -22,6 +22,7 @@ import           Data.Text (Text)
 import           Data.Functor.Fixedpoint (Fix(..))
 import           Data.Foldable (toList)
 
+import Debug.Trace
 
 data Node t = Node t (Expr t)
   deriving (Functor, Traversable, Show, Eq)
@@ -102,15 +103,15 @@ groundTys = mapM $ \v -> manyLookup (UVar v)
 constrain :: (BindingMonad t v m, Fallible t v e, TinyFallible v e, MonadTrans em, Functor (em m), MonadError e (em m), t ~ TyF, Show v)
           => Map Text (Ty v) -> Node v -> em m (Ty v)
 constrain tyEnv (Node tyVar expr) = do ty' <- go expr
-                                       unify (UVar tyVar) ty'
+                                       lift $ bindVar tyVar ty'
+                                       pure ty'
   where go (Lam argName lamBody) = do argTy <- UVar <$> lift freeVar
                                       bodyTy <- constrain (Map.insert argName argTy tyEnv) lamBody
                                       pure (UTerm $ LamTy argTy bodyTy)
         go (App funExp argExp) = do argTy <- constrain tyEnv argExp
                                     funBodyTy <- UVar <$> lift freeVar
-                                    funExpTy <- constrain tyEnv funExp
-                                    funExpTy' <- pure $ UTerm $ LamTy argTy funBodyTy
-                                    unify funExpTy funExpTy'
+                                    funExpTy <- freshen =<< constrain tyEnv funExp
+                                    unify (UTerm $ LamTy argTy funBodyTy) funExpTy
                                     pure funBodyTy
         go (Var text)
          | Just varTy <- Map.lookup text tyEnv = pure varTy
@@ -119,11 +120,19 @@ constrain tyEnv (Node tyVar expr) = do ty' <- go expr
         go (Text _) = pure textTy
 
 initialEnv :: [(Text, Ty v)]
-initialEnv = [("+", lamTy numTy $ lamTy numTy $ numTy)]
+initialEnv = [("+", lamTy numTy $ lamTy numTy $ numTy)
+             ,("inc", lamTy numTy numTy)
+             ]
 
+typecheck :: Node () -> EitherT (Error TyF IntVar) (IntBindingT TyF Identity) (Node (Ty IntVar))
+typecheck code = do tyVarCode <- lift $ allocateTyVars code
+                    constrained <- constrain (Map.fromList initialEnv) tyVarCode
+                    applyBindingsAll (UVar <$> toList tyVarCode)
+                    lift $ groundTys tyVarCode
+                    --pure (UVar <$> tyVarCode)
 
-typecheck :: Node () -> Either (Error TyF IntVar) (Node (UTerm TyF IntVar))
-typecheck code = runIdentity $ evalIntBindingT $ runEitherT $ do tyVarCode <- lift $ (allocateTyVars code :: (IntBindingT TyF Identity) (Node IntVar))
-                                                                 constrained <- constrain (Map.fromList initialEnv) tyVarCode
-                                                                 applyBindingsAll (UVar <$> toList tyVarCode)
-                                                                 lift $ groundTys tyVarCode
+evalTypecheck :: Node () -> Either (Error TyF IntVar) (Node (UTerm TyF IntVar))
+evalTypecheck code = runIdentity $ evalIntBindingT $ runEitherT $ typecheck code
+
+runTypecheck :: Node () -> (Either (Error TyF IntVar) (Node (UTerm TyF IntVar)), IntBindingState TyF)
+runTypecheck code = runIdentity $ runIntBindingT $ runEitherT $ typecheck code
