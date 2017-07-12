@@ -2,9 +2,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 
-import Lib (typecheck, lam, app, var, number, text)
-import Test.Tasty
-import Test.Tasty.HUnit
+import Lib (typecheck
+           , Node(..), Expr(..), TyF(..)
+           , lam, app, var, number, text
+           , lamTy', numTy', textTy')
+
+import           Control.Unification (freeze)
+import           Data.Functor.Fixedpoint (Fix(..))
+
+import           Test.Tasty
+import           Test.Tasty.HUnit
+
+deriving instance Eq (TyF (Fix TyF))
 
 main :: IO ()
 main = defaultMain tests
@@ -12,13 +21,13 @@ main = defaultMain tests
 tests :: TestTree
 tests = testGroup "Whole Checker"
     [ testCase "add two ints" $ do
-        typecheck (app (app (var "+") (number 1)) (number 2))
-            @?= (Node NumTy (App 
-                  (Node (LamTy NumTy NumTy) (App 
-                     (Node (LamTy NumTy (LamTy NumTy NumTy)) (Var "+"))
-                     (Node NumTy (Number 1)
-                  )))
-                  (Node NumTy (Number 2))
-                ))
+        Right ty <- pure . typecheck $ app (app (var "+") (number 1)) (number 2)
+        freeze <$> ty @?= Just <$> Node numTy' (App 
+                                     (Node (lamTy' numTy' numTy') (App 
+                                        (Node (lamTy' numTy' (lamTy' numTy' numTy')) (Var "+"))
+                                        (Node numTy' (Number 1)
+                                     )))
+                                     (Node numTy' (Number 2))
+                                   )
     ]
             

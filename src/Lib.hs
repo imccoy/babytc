@@ -1,7 +1,10 @@
 {-# LANGUAGE UndecidableInstances #-}
 module Lib
-    ( typecheck
+    ( Node(..), Expr(..), TyF(..)
     , lam, app, var, number, text
+    , lamTy, numTy, textTy
+    , lamTy', numTy', textTy'
+    , typecheck
     ) where
 
 import           Control.Monad (void)
@@ -16,13 +19,12 @@ import qualified Data.Map as Map
 import           Data.Map (Map)
 import           Data.Maybe (fromMaybe)
 import           Data.Text (Text)
+import           Data.Functor.Fixedpoint (Fix(..))
 import           Data.Foldable (toList)
-
-import Debug.Trace
 
 
 data Node t = Node t (Expr t)
-  deriving (Functor, Foldable, Traversable, Show)
+  deriving (Functor, Traversable, Show, Eq)
 
 data Expr t = Lam Text (Node t)
             | App (Node t) (Node t)
@@ -30,13 +32,17 @@ data Expr t = Lam Text (Node t)
             | Number Integer
             | Text Text
           --  | Case (Node t) [(Text, Text, Node t)]
-  deriving (Functor, Foldable, Traversable, Show)
+  deriving (Functor, Foldable, Traversable, Show, Eq)
+
+instance Foldable Node where
+  foldMap f (Node v e) = f v `mappend` (foldMap f e)
 
 lam argName body = Node () $ Lam argName body
 app fun arg = Node () $ App fun arg
 var text = Node () $ Var text
 number n = Node () $ Number n
 text t = Node () $ Text t
+
 
 class TinyFallible v a where
   undefinedVar :: Text -> v -> a
@@ -54,14 +60,12 @@ instance TinyFallible v (Error TyF v) where
   undefinedVar = UndefinedVar
 
 data TyF f = LamTy f f
-           | AppTy f f
            | NumTy
            | TextTy
   deriving (Functor, Foldable, Traversable, Show)
 
 instance Unifiable TyF where
   zipMatch (LamTy arg1 body1) (LamTy arg2 body2) = Just $ LamTy (Right (arg1, arg2)) (Right (body1, body2))
-  zipMatch (AppTy fun1 arg1) (AppTy fun2 arg2) = Just $ AppTy (Right (fun1, fun2)) (Right (arg1, arg2))
   zipMatch NumTy NumTy = Just NumTy
   zipMatch TextTy TextTy = Just TextTy
   zipMatch _ _ = Nothing
@@ -71,12 +75,17 @@ type Ty v = UTerm TyF v
 lamTy :: Ty v -> Ty v -> Ty v
 lamTy argTy bodyTy = UTerm $ LamTy argTy bodyTy
 
-appTy :: Ty v -> Ty v -> Ty v
-appTy funTy argTy = UTerm $ AppTy funTy argTy
-
 numTy = UTerm NumTy
 
 textTy = UTerm TextTy
+
+
+lamTy' argTy bodyTy = Fix $ LamTy argTy bodyTy
+
+numTy' = Fix NumTy
+
+textTy' = Fix TextTy
+
 
 allocateTyVars :: forall t v m. BindingMonad t v m => Node () -> m (Node v)
 allocateTyVars = mapM $ \() -> freeVar
