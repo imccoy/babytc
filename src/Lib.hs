@@ -1,7 +1,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 module Lib
     ( Node(..), Expr(..), TyF(..)
-    , lam, app, var, number, text
+    , lam, app, var, lett, number, text
     , lamTy, numTy, textTy
     , lamTy', numTy', textTy'
     , runTypecheck, evalTypecheck, typecheck
@@ -30,6 +30,7 @@ data Node t = Node t (Expr t)
 data Expr t = Lam Text (Node t)
             | App (Node t) (Node t)
             | Var Text
+            | Let [(Text, Node t)] (Node t)
             | Number Integer
             | Text Text
           --  | Case (Node t) [(Text, Text, Node t)]
@@ -41,6 +42,7 @@ instance Foldable Node where
 lam argName body = Node () $ Lam argName body
 app fun arg = Node () $ App fun arg
 var text = Node () $ Var text
+lett bindings expr = Node () $ Let bindings expr
 number n = Node () $ Number n
 text t = Node () $ Text t
 
@@ -87,6 +89,7 @@ numTy' = Fix NumTy
 
 textTy' = Fix TextTy
 
+data NeedsFreshening = NeedsFreshening | SoFreshAlready
 
 allocateTyVars :: forall t v m. BindingMonad t v m => Node () -> m (Node v)
 allocateTyVars = mapM $ \() -> freeVar
@@ -98,24 +101,27 @@ groundTys = mapM $ \v -> manyLookup (UVar v)
                                 Just v' -> manyLookup v'
                                 Nothing -> pure $ UVar v
         manyLookup (UTerm t) = UTerm <$> mapM manyLookup t 
-                         
 
 constrain :: (BindingMonad t v m, Fallible t v e, TinyFallible v e, MonadTrans em, Functor (em m), MonadError e (em m), t ~ TyF, Show v)
-          => Map Text (Ty v) -> Node v -> em m (Ty v)
+          => Map Text (NeedsFreshening, Ty v) -> Node v -> em m (Ty v)
 constrain tyEnv (Node tyVar expr) = do ty' <- go expr
                                        lift $ bindVar tyVar ty'
                                        pure ty'
   where go (Lam argName lamBody) = do argTy <- UVar <$> lift freeVar
-                                      bodyTy <- constrain (Map.insert argName argTy tyEnv) lamBody
+                                      bodyTy <- constrain (Map.insert argName (SoFreshAlready, argTy) tyEnv) lamBody
                                       pure (UTerm $ LamTy argTy bodyTy)
         go (App funExp argExp) = do argTy <- constrain tyEnv argExp
                                     funBodyTy <- UVar <$> lift freeVar
-                                    funExpTy <- freshen =<< constrain tyEnv funExp
+                                    funExpTy <- constrain tyEnv funExp
                                     unify (UTerm $ LamTy argTy funBodyTy) funExpTy
                                     pure funBodyTy
+        go (Let bindings bodyExp) = do bindingTys <- traverse (\(name, exp) -> ((name,) . (NeedsFreshening,)) <$> constrain tyEnv exp) bindings
+                                       constrain (Map.union (Map.fromList bindingTys) tyEnv) bodyExp
+                                       
         go (Var text)
-         | Just varTy <- Map.lookup text tyEnv = pure varTy
-         | otherwise                           = throwError $ undefinedVar text tyVar
+         | Just (NeedsFreshening, varTy) <- Map.lookup text tyEnv = freshen varTy
+         | Just (SoFreshAlready, varTy)  <- Map.lookup text tyEnv = pure varTy
+         | otherwise                                              = throwError $ undefinedVar text tyVar
         go (Number _) = pure numTy
         go (Text _) = pure textTy
 
@@ -126,7 +132,7 @@ initialEnv = [("+", lamTy numTy $ lamTy numTy $ numTy)
 
 typecheck :: Node () -> EitherT (Error TyF IntVar) (IntBindingT TyF Identity) (Node (Ty IntVar))
 typecheck code = do tyVarCode <- lift $ allocateTyVars code
-                    constrained <- constrain (Map.fromList initialEnv) tyVarCode
+                    constrained <- constrain (Map.fromList [(k, (NeedsFreshening, v)) | (k, v) <- initialEnv]) tyVarCode
                     applyBindingsAll (UVar <$> toList tyVarCode)
                     lift $ groundTys tyVarCode
                     --pure (UVar <$> tyVarCode)

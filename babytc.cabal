@@ -33,6 +33,7 @@ library
                      , OverloadedStrings
                      , RankNTypes
                      , StandaloneDeriving
+                     , TupleSections
                      , ScopedTypeVariables
   default-language:    Haskell2010
 
