@@ -138,17 +138,10 @@ constrain tyEnv (Node tyVar expr) = do ty' <- go expr
         go (Number _) = pure numTy
         go (Text _) = pure textTy
 
-data ForallTyR f = ForallF [Text] f
-                 | TyVarF Text
-                 | HereTyF f
-
-deriving instance (Show f) => Show (ForallTyR f)
-
-data ForallTyW f = ForallTyW (ForallTyR (TyF f))
-
-deriving instance (Show f) => Show (ForallTyW f)
-
-type ForallTy = Fix ForallTyW
+data ForallTy = Forall [Text] (TyF ForallTy)
+              | TyVar Text
+              | HereTy (TyF ForallTy)
+  deriving (Show)
 
 commonTyVars :: (BindingMonad t v m, t ~ TyF, Variable v) => Map Int Text -> Ty v -> Ty v -> m [(Int, Text)]
 commonTyVars env ty1 ty2 = do ty1FreeVars <- getFreeVars ty1
@@ -163,22 +156,23 @@ commonTyVars env ty1 ty2 = do ty1FreeVars <- getFreeVars ty1
 generalise :: forall t v e m em. (BindingMonad t v m, t ~ TyF, Show v, Variable v, MonadError e (em m), MonadTrans em, TinyFallible v e) => Node (Ty v) -> em m (Node ForallTy)
 generalise = go Map.empty
   where go :: Map Int Text -> Node (Ty v) -> em m (Node ForallTy)
-        go env (Node (UTerm (LamTy argTy resTy)) exp) = do newTyVars <- Map.fromList <$> (lift $ commonTyVars env argTy resTy)
-                                                           let newEnv = Map.union newTyVars env
-                                                           ty <- LamTy <$> go' newEnv argTy <*> go' newEnv resTy
+        go env (Node (UTerm (LamTy argTy resTy)) exp) = do (newEnv, lamTy) <- generaliseLamTy env argTy resTy
                                                            exp' <- exprMap1 (go newEnv) exp
-                                                           pure $ Node (Fix . ForallTyW . ForallF (Map.elems newTyVars) $ ty) exp'
+                                                           pure $ Node lamTy exp'
         go env (Node ty exp) = Node <$> go' env ty <*> exprMap1 (go env) exp
 
         go' :: Map Int Text -> Ty v -> em m ForallTy
-        go' env (UTerm (LamTy argTy resTy)) = do newTyVars <- Map.fromList <$> (lift $ commonTyVars env argTy resTy)
-                                                 let newEnv = Map.union newTyVars env
-                                                 ty <- LamTy <$> go' newEnv argTy <*> go' newEnv resTy
-                                                 pure . Fix . ForallTyW . ForallF (Map.elems newTyVars) $ ty
-        go' env (UTerm TextTy) = pure . Fix . ForallTyW . HereTyF $ TextTy
-        go' env (UTerm NumTy) = pure . Fix . ForallTyW . HereTyF $ NumTy
-        go' env (UVar v) | Just n <- Map.lookup (getVarID v) env = pure . Fix . ForallTyW . TyVarF $ n
+        go' env (UTerm (LamTy argTy resTy)) = snd <$> generaliseLamTy env argTy resTy
+        go' env (UTerm TextTy) = pure . HereTy $ TextTy
+        go' env (UTerm NumTy) = pure . HereTy $ NumTy
+        go' env (UVar v) | Just n <- Map.lookup (getVarID v) env = pure . TyVar $ n
                          | otherwise                             = throwError (undefinedTyVar v)
+
+        generaliseLamTy env argTy resTy = do newTyVars <- Map.fromList <$> (lift $ commonTyVars env argTy resTy)
+                                             let newEnv = Map.union newTyVars env
+                                             ty <- LamTy <$> go' newEnv argTy <*> go' newEnv resTy
+                                             pure (newEnv, Forall (Map.elems newTyVars) ty)
+
 
 
 
