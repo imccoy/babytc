@@ -1,6 +1,6 @@
 {-# LANGUAGE UndecidableInstances #-}
 module Lib
-    ( Node(..), Expr(..), TyF(..)
+    ( ExprF(..), Expr, TyF(..)
     , lam, app, var, lett, number, text
     , lamTy, numTy, textTy
     , lamTy', numTy', textTy'
@@ -23,51 +23,29 @@ import qualified Data.Set as Set
 import           Data.Set (Set)
 import           Data.Text (Text)
 import qualified Data.Text as T
-import           Data.Functor.Fixedpoint (Fix(..))
+import           Data.Functor.Fixedpoint (Fix(..), hmapM, cata)
 import           Data.Foldable (toList)
 
 import Debug.Trace
 
-data Node t = Node t (Expr t)
-  deriving (Functor, Traversable, Show, Eq)
-
-nodeDecoration (Node d _) = d
-
-data Expr t = Lam Text (Node t)
-            | App (Node t) (Node t)
+data ExprF f = Lam Text f
+            | App f f
             | Var Text
-            | Let [(Text, Node t)] (Node t)
+            | Let [(Text, f)] f
             | Number Integer
             | Text Text
           --  | Case (Node t) [(Text, Text, Node t)]
   deriving (Functor, Foldable, Traversable, Show, Eq)
 
-instance Foldable Node where
-  foldMap f (Node v e) = f v `mappend` (foldMap f e)
+type Expr = Fix ExprF
 
-exprMap1 :: (Functor m, Applicative m) => (Node t1 -> m (Node t2)) -> Expr t1 -> m (Expr t2)
-exprMap1 f (Lam t n) = Lam t <$> f n
-exprMap1 f (App n1 n2) = App <$> f n1 <*> f n2
-exprMap1 f (Let tns n) = Let <$> traverse (\(t, n) -> (t,) <$> f n) tns <*> f n
-exprMap1 _ (Var v) = pure $ Var v
-exprMap1 _ (Number n) = pure $ Number n
-exprMap1 _ (Text t) = pure $ Text t
-
-exprChildNodes :: Expr t -> [Node t]
-exprChildNodes (Lam _ lamBody) = [lamBody]
-exprChildNodes (App lamExp argExp) = [lamExp, argExp]
-exprChildNodes (Let bindings bound) = bound:(map snd bindings)
-exprChildNodes _ = []
-
-childNodes :: Node t -> [Node t]
-childNodes (Node _ e) = exprChildNodes e
-
-lam argName body = Node () $ Lam argName body
-app fun arg = Node () $ App fun arg
-var text = Node () $ Var text
-lett bindings expr = Node () $ Let bindings expr
-number n = Node () $ Number n
-text t = Node () $ Text t
+lam :: Text -> Expr -> Expr
+lam argName body = Fix $ Lam argName body
+app fun arg = Fix $ App fun arg
+var text = Fix $ Var text
+lett bindings expr = Fix $ Let bindings expr
+number n = Fix $ Number n
+text t = Fix $ Text t
 
 
 class TinyFallible v a where
@@ -115,13 +93,49 @@ numTy' = Fix NumTy
 
 textTy' = Fix TextTy
 
+
+data TyVard v e = TyVard v e
+  deriving (Functor, Foldable, Traversable, Show, Eq)
+
+data TyVardExprF v f = TyVardExprF (TyVard v (ExprF f))
+  deriving (Functor, Foldable, Traversable, Show, Eq)
+
+type TyVardExpr v = Fix (TyVardExprF v)
+
+
+data Typed v e = Typed (Ty v) e
+  deriving (Functor, Foldable, Traversable, Show)
+
+deriving instance (Eq (Ty v), Eq e) => Eq (Typed v e)
+
+data TypedExprF v f = TypedExprF (Typed v (ExprF f))
+  deriving (Functor, Foldable, Traversable, Show)
+
+deriving instance (Eq (Ty v), Eq e) => Eq (TypedExprF v e)
+
+type TypedExpr v = Fix (TypedExprF v)
+
+exprMap1 :: (Monad m) => (a -> m b) -> ExprF a -> m (ExprF b)
+exprMap1 = mapM 
+
+exprChildNodes :: ExprF a -> [a]
+exprChildNodes = foldMap pure
+
+
+
 data NeedsFreshening = NeedsFreshening | SoFreshAlready
 
-allocateTyVars :: forall t v m. BindingMonad t v m => Node () -> m (Node v)
-allocateTyVars = mapM $ \() -> freeVar
+withTyVar e v = TyVard v e
+withType e v = Typed v e
 
-groundTys :: forall v m. (BindingMonad TyF v m) => Node v -> m (Node (Ty v))
-groundTys = mapM $ \v -> manyLookup (UVar v)
+allocateTyVars :: forall t v m. (BindingMonad t v m, t ~ TyF) => Expr -> m (TyVardExpr v)
+allocateTyVars = hmapM $ \e -> TyVardExprF . withTyVar e <$> freeVar
+
+allTyVars :: TyVardExpr v -> [v]
+allTyVars = cata $ concat . toList 
+
+groundTys :: forall v m. (BindingMonad TyF v m) => TyVardExpr v -> m (TypedExpr v)
+groundTys = hmapM $ \(TyVardExprF (TyVard v e)) -> TypedExprF . withType e <$> manyLookup (UVar v)
   where manyLookup :: UTerm TyF v -> m (UTerm TyF v)
         manyLookup (UVar v) = lookupVar v >>= \case
                                 Just v' -> manyLookup v'
@@ -129,10 +143,10 @@ groundTys = mapM $ \v -> manyLookup (UVar v)
         manyLookup (UTerm t) = UTerm <$> mapM manyLookup t 
 
 constrain :: (BindingMonad t v m, Fallible t v e, TinyFallible v e, MonadTrans em, Functor (em m), MonadError e (em m), t ~ TyF, Show v)
-          => Map Text (NeedsFreshening, Ty v) -> Node v -> em m (Ty v)
-constrain tyEnv (Node tyVar expr) = do ty' <- go expr
-                                       lift $ bindVar tyVar ty'
-                                       pure ty'
+          => Map Text (NeedsFreshening, Ty v) -> TyVardExpr v -> em m (Ty v)
+constrain tyEnv (Fix (TyVardExprF (TyVard tyVar expr))) = do ty' <- go expr
+                                                             lift $ bindVar tyVar ty'
+                                                             pure ty'
   where go (Lam argName lamBody) = do argTy <- UVar <$> lift freeVar
                                       bodyTy <- constrain (Map.insert argName (SoFreshAlready, argTy) tyEnv) lamBody
                                       pure (UTerm $ LamTy argTy bodyTy)
@@ -173,31 +187,45 @@ instance (Show (f (ForallTyF f))) => Show (ForallTyF f)
 
 type ForallTy = ForallTyF TyF
 
-generalise :: forall t v e m em. (BindingMonad t v m, t ~ TyF, Show v, Variable v, MonadError e (em m), MonadTrans em, TinyFallible v e) => Node (Ty v) -> em m (Node ForallTy)
+
+data ForallTyd e = ForallTyd ForallTy e
+  deriving (Functor, Foldable, Traversable, Show)
+
+deriving instance (Eq ForallTy, Eq e) => Eq (ForallTyd e)
+
+data ForallTydExprF f = ForallTydExprF (ForallTyd (ExprF f))
+  deriving (Functor, Foldable, Traversable, Show)
+
+deriving instance (Eq ForallTy, Eq e) => Eq (ForallTydExprF e)
+
+type ForallTydExpr = Fix ForallTydExprF
+
+
+generalise :: forall t v e m em. (BindingMonad t v m, t ~ TyF, Show v, Variable v, MonadError e (em m), MonadTrans em, TinyFallible v e) => TypedExpr v -> em m ForallTydExpr
 generalise = goTop Map.empty
-  where goTop :: Map Int Text -> Node (Ty v) -> em m (Node ForallTy)
-        goTop env node@(Node ty exp) = do vars <- collectNonLetFreeVarIDs node
-                                          let newVarIDs = Set.filter (`Map.notMember` env) vars
-                                          let usedNames = Map.elems env
-                                          let candidateNames = filter (`List.notElem` usedNames) . fmap (T.pack . ("t" ++) . show) $ [0..]
-                                          let newEnvElems = zip (Set.toList newVarIDs) candidateNames
-                                          let newEnv = Map.union (Map.fromList newEnvElems) env
-                                          (Node ty' exp') <- go newEnv node
-                                          pure $ Node (Forall (snd <$> newEnvElems) ty') exp'
+  where goTop :: Map Int Text -> TypedExpr v -> em m ForallTydExpr
+        goTop env node@(Fix (TypedExprF (Typed ty expr))) = do vars <- collectNonLetFreeVarIDs node
+                                                               let newVarIDs = Set.filter (`Map.notMember` env) vars
+                                                               let usedNames = Map.elems env
+                                                               let candidateNames = filter (`List.notElem` usedNames) . fmap (T.pack . ("t" ++) . show) $ [0..]
+                                                               let newEnvElems = zip (Set.toList newVarIDs) candidateNames
+                                                               let newEnv = Map.union (Map.fromList newEnvElems) env
+                                                               (Fix (ForallTydExprF (ForallTyd ty' expr'))) <- go newEnv node
+                                                               pure $ Fix $ ForallTydExprF $ ForallTyd (Forall (snd <$> newEnvElems) ty') expr'
 
-        collectNonLetFreeVarIDs :: Node (Ty v) -> em m (Set Int)
-        collectNonLetFreeVarIDs (Node ty expr) = do fvs <- Set.fromList <$> (fmap getVarID <$> lift (getFreeVars ty))
-                                                    Set.union fvs <$> case expr of
-                                                      Let _ body -> collectNonLetFreeVarIDs body
-                                                      _ -> Set.unions <$> mapM collectNonLetFreeVarIDs (exprChildNodes expr)
+        collectNonLetFreeVarIDs :: TypedExpr v -> em m (Set Int)
+        collectNonLetFreeVarIDs (Fix (TypedExprF (Typed ty expr))) = do fvs <- Set.fromList <$> (fmap getVarID <$> lift (getFreeVars ty))
+                                                                        Set.union fvs <$> case expr of
+                                                                          Let _ body -> collectNonLetFreeVarIDs body
+                                                                          _ -> Set.unions <$> mapM collectNonLetFreeVarIDs (exprChildNodes expr)
 
-        go :: Map Int Text -> Node (Ty v) -> em m (Node ForallTy)
-        go env (Node ty (Let bindings body)) = do ty' <- go' env ty
-                                                  bindings' <- forM bindings $ \(name, exp) -> (name,) <$> goTop env exp
-                                                  body' <- go env body
-                                                  pure $ Node ty' (Let bindings' body')
-        go env (Node ty exp) = do ty' <- go' env ty
-                                  Node ty' <$> exprMap1 (go env) exp
+        go :: Map Int Text -> TypedExpr v -> em m (ForallTydExpr)
+        go env (Fix (TypedExprF (Typed ty (Let bindings body)))) = do ty' <- go' env ty
+                                                                      bindings' <- forM bindings $ \(name, exp) -> (name,) <$> goTop env exp
+                                                                      body' <- go env body
+                                                                      pure . Fix . ForallTydExprF $ ForallTyd ty' (Let bindings' body')
+        go env (Fix (TypedExprF (Typed ty exp))) = do ty' <- go' env ty
+                                                      (Fix . ForallTydExprF . ForallTyd ty') <$> exprMap1 (go env) exp
 
         go' :: Map Int Text -> Ty v -> em m ForallTy
         go' env (UTerm (LamTy argTy resTy)) = HereTy <$> (LamTy <$> go' env argTy <*> go' env resTy)
@@ -211,20 +239,19 @@ initialEnv = [("+", lamTy numTy $ lamTy numTy $ numTy)
              ,("inc", lamTy numTy numTy)
              ]
 
-typecheck :: Node () -> EitherT (Error TyF IntVar) (IntBindingT TyF Identity) (Node (Ty IntVar))
+typecheck :: Expr -> EitherT (Error TyF IntVar) (IntBindingT TyF Identity) (TypedExpr IntVar)
 typecheck code = do tyVarCode <- lift $ allocateTyVars code
                     constrained <- constrain (Map.fromList [(k, (NeedsFreshening, v)) | (k, v) <- initialEnv]) tyVarCode
-                    applyBindingsAll (UVar <$> toList tyVarCode)
+                    applyBindingsAll (UVar <$> allTyVars tyVarCode)
                     lift $ groundTys tyVarCode
                     --pure (UVar <$> tyVarCode)
 
-evalTypecheck :: Node () -> Either (Error TyF IntVar) (Node (UTerm TyF IntVar))
+evalTypecheck :: Expr -> Either (Error TyF IntVar) (TypedExpr IntVar)
 evalTypecheck code = runIdentity $ evalIntBindingT $ runEitherT $ typecheck code
 
-evalGeneralisedTypecheck :: Node () -> Either (Error TyF IntVar) (Node ForallTy)
+evalGeneralisedTypecheck :: Expr -> Either (Error TyF IntVar) (ForallTydExpr)
 evalGeneralisedTypecheck code = runIdentity $ evalIntBindingT $ runEitherT $ (generalise <=< typecheck) code
 
-runTypecheck :: Node () -> (Either (Error TyF IntVar) (Node (UTerm TyF IntVar)), IntBindingState TyF)
+runTypecheck :: Expr -> (Either (Error TyF IntVar) (TypedExpr IntVar), IntBindingState TyF)
 runTypecheck code = runIdentity $ runIntBindingT $ runEitherT $ typecheck code
-
 
