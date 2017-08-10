@@ -1,4 +1,4 @@
-{-# LANGUAGE UndecidableInstances, FunctionalDependencies #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Lib
     ( ExprF(..), Expr, TyF(..)
     , lam, app, var, lett, number, text
@@ -48,11 +48,11 @@ number n = Fix $ Number n
 text t = Fix $ Text t
 
 
-class TinyFallible v a | a -> v where
-  undefinedVar   :: Text -> a
+class TinyFallible v a where
+  undefinedVar   :: Text -> v -> a
   undefinedTyVar :: v -> a
 
-data Error t v = UndefinedVar Text
+data Error t v = UndefinedVar Text v
                | UndefinedTyVar v
                | UFailure (UFailure t v)
 
@@ -151,50 +151,41 @@ constrain tyEnv (Fix (AnnExprF tyVar expr)) = do ty' <- go expr
         go (Var text)
          | Just (NeedsFreshening, varTy) <- Map.lookup text tyEnv = freshen varTy
          | Just (SoFreshAlready, varTy)  <- Map.lookup text tyEnv = pure varTy
-         | otherwise                                              = throwError $ undefinedVar text
+         | otherwise                                              = throwError $ undefinedVar text tyVar
         go (Number _) = pure numTy
         go (Text _) = pure textTy
 
 
 constrain' :: forall e m em t v. (BindingMonad t v m, Fallible t v e, TinyFallible v e, MonadTrans em, Functor (em m), MonadError e (em m), t ~ TyF, Show v)
-          => Map Text (NeedsFreshening, Ty v) -> TyVardExpr v -> em m (Ty v)
-
+           => Map Text (NeedsFreshening, Ty v) -> TyVardExpr v -> em m (Ty v)
 constrain' tyEnv tyVardExpr = cata alg tyVardExpr $ tyEnv
-     where
-
-           alg :: AnnExprF v (Map Text (NeedsFreshening, Ty v) -> em m (Ty v))
-               -> (Map Text (NeedsFreshening, Ty v) -> em m (Ty v))
-           alg v@(AnnExprF tyVar expr) tyEnv = do expr' <- go expr tyEnv
-                                                  lift $ bindVar tyVar expr'
-                                                  pure expr'
-
-
-           go :: ExprF (Map Text (NeedsFreshening, Ty v) -> em m (Ty v)) -> Map Text (NeedsFreshening, Ty v) -> em m (Ty v)
-           go (Lam argName fBodyTy) tyEnv = do argTy <- UVar <$> lift freeVar
-                                               bodyTy <- fBodyTy $ Map.insert argName (SoFreshAlready, argTy) tyEnv
-                                               pure . UTerm $ LamTy argTy bodyTy
-           go (App fFunExpTy fArgTy) tyEnv = do argTy <- fArgTy tyEnv
-                                                funBodyTy <- UVar <$> lift freeVar
-                                                funExpTy <- fFunExpTy tyEnv
-                                                unify (UTerm $ LamTy argTy funBodyTy) funExpTy
-                                                pure funBodyTy
-           go (Let bindings fBodyTy) tyEnv = do bindingTys <- sequence . flip Map.mapWithKey (Map.fromList bindings) $ \bindingName fBindingTy -> do
-                                                  stubVar <- UVar <$> lift freeVar
-                                                  realVar <- fBindingTy $ Map.insert bindingName (SoFreshAlready, stubVar) tyEnv
-                                                  (NeedsFreshening,) <$> (stubVar =:= realVar)
-                                                fBodyTy $ Map.union bindingTys tyEnv
+  where
+    alg :: AnnExprF v (Map Text (NeedsFreshening, Ty v) -> em m (Ty v))
+        -> (Map Text (NeedsFreshening, Ty v) -> em m (Ty v))
+    alg v@(AnnExprF tyVar expr) tyEnv
+       = do expr' <- case expr of
+                       (Lam argName fBodyTy) -> do argTy <- UVar <$> lift freeVar
+                                                   bodyTy <- fBodyTy $ Map.insert argName (SoFreshAlready, argTy) tyEnv
+                                                   pure . UTerm $ LamTy argTy bodyTy
+                       (App fFunExpTy fArgTy) -> do argTy <- fArgTy tyEnv
+                                                    funBodyTy <- UVar <$> lift freeVar
+                                                    funExpTy <- fFunExpTy tyEnv
+                                                    unify (UTerm $ LamTy argTy funBodyTy) funExpTy
+                                                    pure funBodyTy
+                       (Let bindings fBodyTy) -> do bindingTys <- sequence . flip Map.mapWithKey (Map.fromList bindings) $ \bindingName fBindingTy -> do
+                                                      stubVar <- UVar <$> lift freeVar
+                                                      realVar <- fBindingTy $ Map.insert bindingName (SoFreshAlready, stubVar) tyEnv
+                                                      (NeedsFreshening,) <$> (stubVar =:= realVar)
+                                                    fBodyTy $ Map.union bindingTys tyEnv
  
-           go (Var text) tyEnv
-            | Just (NeedsFreshening, varTy) <- Map.lookup text tyEnv = freshen varTy
-            | Just (SoFreshAlready, varTy)  <- Map.lookup text tyEnv = pure varTy
-            | otherwise                                              = throwError $ undefinedVar text
-           go (Number _) tyEnv = pure numTy
-           go (Text _) tyEnv = pure textTy
-{-
- --  where go :: ExprF (Map Text (NeedsFreshening, Ty v) -> Fix (AnnExprF v) -> em m (UTerm TyF v))
---           -> em m (Fix (AnnExprF v)
---           -> em m (UTerm TyF v))
--}
+                       (Var text)
+                         | Just (NeedsFreshening, varTy) <- Map.lookup text tyEnv -> freshen varTy
+                         | Just (SoFreshAlready, varTy)  <- Map.lookup text tyEnv -> pure varTy
+                         | otherwise                                              -> throwError $ undefinedVar text tyVar
+                       (Number _) -> pure numTy
+                       (Text _) -> pure textTy
+            lift $ bindVar tyVar expr'
+            pure expr'
 
 
 data ForallTyF f = Forall [Text] (ForallTyF f)
