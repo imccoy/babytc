@@ -21,6 +21,7 @@ library
                      , containers
                      , either
                      , mtl
+                     , recursion-schemes
                      , text
                      , unification-fd
   default-extensions:  DeriveFunctor
