@@ -208,20 +208,12 @@ instance (Show (f (ForallTyF f))) => Show (ForallTyF f)
           where app_prec = 10
 
 
-type ForallTy = ForallTyF TyF
-
-
-data ForallTyd e = ForallTyd ForallTy e
+data ForallTyExprF f = ForallTyExprF (ForallTyF TyF) (ExprF f)
   deriving (Functor, Foldable, Traversable, Show)
 
-deriving instance (Eq ForallTy, Eq e) => Eq (ForallTyd e)
+deriving instance (Eq (ForallTyF TyF), Eq e) => Eq (ForallTyExprF e)
 
-data ForallTydExprF f = ForallTydExprF (ForallTyd (ExprF f))
-  deriving (Functor, Foldable, Traversable, Show)
-
-deriving instance (Eq ForallTy, Eq e) => Eq (ForallTydExprF e)
-
-type ForallTydExpr = Fix ForallTydExprF
+type ForallTyExpr = Fix ForallTyExprF
 
 para :: Functor f => (f (Fix f, a) -> a) -> Fix f -> a
 para f = snd . cata (\v -> (Fix (fst <$> v), f v))
@@ -230,17 +222,15 @@ paraM :: (Traversable f, Functor f, Monad m) => (f (Fix f, a) -> m a) -> Fix f -
 paraM f = fmap snd . cataM (\v -> do v' <- f v
                                      pure (Fix (fst <$> v), v'))
 
-generalise :: forall t v e m em. (BindingMonad t v m, t ~ TyF, Show v, Variable v, MonadError e (em m), MonadTrans em, TinyFallible v e) => TypedExpr v -> em m ForallTydExpr
+generalise :: forall t v e m em. (BindingMonad t v m, t ~ TyF, Show v, Variable v, MonadError e (em m), MonadTrans em, TinyFallible v e) => TypedExpr v -> em m ForallTyExpr
 generalise expr = withLowestForalls <$> annotatedWithTyVarIds expr >>= \(f, _) -> f Map.empty
-  where withLowestForalls :: Fix (AnnExprF (Ty v, Set Int)) -> (Map Int Text -> em m ForallTydExpr, Set Int)
+  where withLowestForalls :: Fix (AnnExprF (Ty v, Set Int)) -> (Map Int Text -> em m ForallTyExpr, Set Int)
         withLowestForalls = cata $ \(AnnExprF (ty, tyVarIds) expr) -> (\tyEnv -> do let childTyVarSets = snd <$> toList expr
                                                                                     let childTyVarMaps = Map.fromSet (const (1 :: Int)) <$> childTyVarSets
                                                                                     let counts = Map.unionsWith (+) childTyVarMaps
-                                                                                    let singleAppearances = Map.filter (== 1) counts
-                                                                                    hereVars <- lift $ fmap getVarID <$> getFreeVars ty
-                                                                                    let forallOnes = List.filter (`Map.member` singleAppearances) hereVars
-                                                                                    let forallManies = Map.keys . Map.filter (>1) $ counts
-                                                                                    let forallIds = List.filter (`Map.notMember` tyEnv) $ forallOnes ++ forallManies
+                                                                                    forallHere <- lift $ fmap getVarID <$> getFreeVars ty
+                                                                                    let forallFromChildExps = Map.keys . Map.filter (>1) $ counts
+                                                                                    let forallIds = List.nub . List.filter (`Map.notMember` tyEnv) $ forallHere ++ forallFromChildExps
                                                                                     let usedNames = Set.fromList . Map.elems $ tyEnv
                                                                                     let names = filter (`Set.notMember` usedNames) ["t" `T.append` (T.pack . show $ n) | n <- [(0::Int)..]]
                                                                                     let newNameIds = zip forallIds names
@@ -249,8 +239,8 @@ generalise expr = withLowestForalls <$> annotatedWithTyVarIds expr >>= \(f, _) -
                                                                                     expr' <- traverse (\(f, _) -> f newTyEnv) expr
                                                                                     ty' <- forallTy newTyEnv ty
                                                                                     if null newNameIds
-                                                                                      then pure $ Fix $ ForallTydExprF $ ForallTyd ty' expr'
-                                                                                      else pure $ Fix $ ForallTydExprF $ ForallTyd (Forall (snd <$> newNameIds) ty') expr'
+                                                                                      then pure $ Fix $ ForallTyExprF ty' expr'
+                                                                                      else pure $ Fix $ ForallTyExprF (Forall (snd <$> newNameIds) ty') expr'
                                                                       ,tyVarIds)
 
         annotatedWithTyVarIds :: TypedExpr v -> em m (Fix (AnnExprF (Ty v, Set Int)))
@@ -259,7 +249,7 @@ generalise expr = withLowestForalls <$> annotatedWithTyVarIds expr >>= \(f, _) -
                                                                   let thereIds = snd . annFromAnnExpr <$> toList expr
                                                                   pure . Fix $ AnnExprF (ty, Set.unions $ hereVarIds:thereIds) expr
 
-        forallTy :: Map Int Text -> Ty v -> em m ForallTy
+        forallTy :: Map Int Text -> Ty v -> em m (ForallTyF TyF)
         forallTy env = cataM alg . refix . buildUTermF
           where alg (UTermF t) = pure $ HereTy t
                 alg (UVarF v) | Just n <- Map.lookup (getVarID v) env = pure . TyVar $ n
@@ -280,7 +270,7 @@ typecheck code = do tyVarCode <- lift $ allocateTyVars code
 evalTypecheck :: Expr -> Either (Error TyF IntVar) (TypedExpr IntVar)
 evalTypecheck code = runIdentity $ evalIntBindingT $ runEitherT $ typecheck code
 
-evalGeneralisedTypecheck :: Expr -> Either (Error TyF IntVar) (ForallTydExpr)
+evalGeneralisedTypecheck :: Expr -> Either (Error TyF IntVar) (ForallTyExpr)
 evalGeneralisedTypecheck code = runIdentity $ evalIntBindingT $ runEitherT $ (generalise <=< typecheck) code
 
 runTypecheck :: Expr -> (Either (Error TyF IntVar) (TypedExpr IntVar), IntBindingState TyF)
