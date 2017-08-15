@@ -193,11 +193,12 @@ constrain' tyEnv tyVardExpr = cata alg tyVardExpr $ tyEnv
             pure expr'
 
 
-data ForallTyF f = Forall [Text] (ForallTyF f)
-                 | TyVar Text
-                 | HereTy (f (ForallTyF f))
+data ForallTyF t f = Forall [Text] f
+                   | TyVar Text
+                   | HereTy (t f)
+  deriving (Functor)
 
-instance (Show (f (ForallTyF f))) => Show (ForallTyF f)
+instance (Show (t f), Show f) => Show (ForallTyF t f)
   where showsPrec d (TyVar t) = (T.unpack t ++)
         showsPrec d (HereTy t) = showsPrec d t
         showsPrec d (Forall ns ty) = showParen (d > app_prec) $
@@ -208,12 +209,7 @@ instance (Show (f (ForallTyF f))) => Show (ForallTyF f)
           where app_prec = 10
 
 
-data ForallTyExprF f = ForallTyExprF (ForallTyF TyF) (ExprF f)
-  deriving (Functor, Foldable, Traversable, Show)
-
-deriving instance (Eq (ForallTyF TyF), Eq e) => Eq (ForallTyExprF e)
-
-type ForallTyExpr = Fix ForallTyExprF
+type ForallTyExpr = AnnExpr (Fix (ForallTyF TyF))
 
 para :: Functor f => (f (Fix f, a) -> a) -> Fix f -> a
 para f = snd . cata (\v -> (Fix (fst <$> v), f v))
@@ -239,8 +235,8 @@ generalise expr = withLowestForalls <$> annotatedWithTyVarIds expr >>= \(f, _) -
                                                                                     expr' <- traverse (\(f, _) -> f newTyEnv) expr
                                                                                     ty' <- forallTy newTyEnv ty
                                                                                     if null newNameIds
-                                                                                      then pure $ Fix $ ForallTyExprF ty' expr'
-                                                                                      else pure $ Fix $ ForallTyExprF (Forall (snd <$> newNameIds) ty') expr'
+                                                                                      then pure $ Fix $ AnnExprF ty' expr'
+                                                                                      else pure $ Fix $ AnnExprF (Fix $ Forall (snd <$> newNameIds) ty') expr'
                                                                       ,tyVarIds)
 
         annotatedWithTyVarIds :: TypedExpr v -> em m (Fix (AnnExprF (Ty v, Set Int)))
@@ -249,10 +245,10 @@ generalise expr = withLowestForalls <$> annotatedWithTyVarIds expr >>= \(f, _) -
                                                                   let thereIds = snd . annFromAnnExpr <$> toList expr
                                                                   pure . Fix $ AnnExprF (ty, Set.unions $ hereVarIds:thereIds) expr
 
-        forallTy :: Map Int Text -> Ty v -> em m (ForallTyF TyF)
+        forallTy :: Map Int Text -> Ty v -> em m (Fix (ForallTyF TyF))
         forallTy env = cataM alg . refix . buildUTermF
-          where alg (UTermF t) = pure $ HereTy t
-                alg (UVarF v) | Just n <- Map.lookup (getVarID v) env = pure . TyVar $ n
+          where alg (UTermF t) = pure $ Fix $ HereTy t
+                alg (UVarF v) | Just n <- Map.lookup (getVarID v) env = pure . Fix . TyVar $ n
                               | otherwise                             = throwError (undefinedTyVar v)
 
 initialEnv :: [(Text, Ty v)]
